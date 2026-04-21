@@ -94,23 +94,31 @@ Takes **feedback** or a **list of fix-items** for an academic document (a `.tex`
 
 ## Installation
 
+### From GitHub (recommended)
+
+Claude Code plugin installs go through a **marketplace registration** step first, then install the plugin by `<plugin-name>@<marketplace-name>`. Since `youra-tools` ships its own `.claude-plugin/marketplace.json`, the full flow is two commands:
+
+```
+/plugin marketplace add PrayPrey/youra-tools
+/plugin install youra-tools@youra-tools
+```
+
+After that, confirm it's enabled (`/plugin` opens the manager UI) and all six skills are callable as `/youra-tools:<name>`.
+
 ### Local development (this machine)
 
-```
-/plugin install C:/Users/OWNER/Desktop/Woo_Yoon_Kyu/Paper_review_workflow/youra-tools
-```
-
-### From GitHub (after publishing)
+For iterating on the plugin locally without pushing to GitHub, register the local marketplace directory first:
 
 ```
-/plugin install github:PrayPrey/youra-tools
-```
-
-Or, if added to a marketplace:
-
-```
-/plugin marketplace add github:PrayPrey/youra-tools
+/plugin marketplace add C:/Users/OWNER/Desktop/Woo_Yoon_Kyu/Paper_review_workflow/youra-tools
 /plugin install youra-tools@youra-tools
+```
+
+### Updating
+
+```
+/plugin marketplace update youra-tools
+/plugin update youra-tools@youra-tools
 ```
 
 ## Requirements
