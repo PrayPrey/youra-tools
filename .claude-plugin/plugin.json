@@ -1,0 +1,30 @@
+{
+  "name": "youra-tools",
+  "version": "0.4.0",
+  "description": "Claude Code skills for academic paper workflows: literature gap-finding, results-faithful Experiments rewriting, code-faithful Methodology writing, strict peer-review simulation, feedback-driven revision looping, and a pre-submission stress-test orchestrator — all with hallucination-proof verification loops.",
+  "author": {
+    "name": "Yoon Kyu Woo",
+    "email": "yoon303b@gmail.com"
+  },
+  "repository": "https://github.com/PrayPrey/youra-tools",
+  "homepage": "https://github.com/PrayPrey/youra-tools",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "plugin",
+    "academic",
+    "paper",
+    "literature-review",
+    "research-gap",
+    "peer-review",
+    "experiments",
+    "methodology",
+    "rebuttal",
+    "revision-loop",
+    "feedback-loop",
+    "submission-ready",
+    "stress-test",
+    "orchestrator"
+  ],
+  "skills": "./skills/"
+}
