@@ -13,7 +13,7 @@ triggers:
   - 반복 수정
   - 리비전 루프
   - 피드백 적용
-argument-hint: "[--feedback=<path|text|review-dir>] [--target=<file.tex|file.md|dir>] [--lang=en|ko] [--max-rounds=<N>] [--reviewer=architect|critic|code-reviewer|verifier] [--out=<session-dir>] [--allow-bib=<custom.bib>]"
+argument-hint: "[--feedback=<path|text|review-dir>] [--target=<file.tex|file.md|dir>] [--lang=en|ko] [--max-rounds=<N>] [--reviewer=architect|critic|code-reviewer|verifier] [--out=<session-dir>] [--allow-bib=<custom.bib>] [--scope=text-only|all]"
 level: 3
 ---
 
@@ -55,6 +55,7 @@ Parse the invocation string. All arguments are optional — ask the user once wi
 | `--reviewer=<agent>` | Reviewer agent for the verification gate: `architect` (Opus, default, academic rigour), `critic` (Opus, harsher), `code-reviewer` (Sonnet, faster for markup-level checks), `verifier` (evidence-focused). | `architect` |
 | `--out=<path>` | Session directory for the revision bundle. | `.omc/revisions/{timestamp}-{slug(target)}/` |
 | `--allow-bib=<custom.bib>` | Bib file that new `\cite{...}` keys must exist in, for `.tex` targets. | Auto-detect the nearest `*.bib` next to the target; if none, disable citation additions. |
+| `--scope=text-only\|all` | Which feedback items to act on. `text-only` (default): only items that can be fixed by editing the document — text rewrites, table/caption fixes, citation swaps, limitations additions, reinterpretation of existing results. Items requiring **new experiments, new training/inference runs, new datasets, new ablations, or new baselines** are deferred to `report.md` and `deferred.json`, not applied. `all`: legacy behaviour — every issue is in scope, including those requiring new runs. | `text-only` |
 
 ## Session artefacts
 
@@ -62,7 +63,8 @@ Parse the invocation string. All arguments are optional — ask the user once wi
 .omc/revisions/{timestamp}-{slug(target)}/
   state.json              # resolved arguments + target file snapshot (pre-edit hash)
   feedback.md             # normalized feedback verbatim (copied or concatenated)
-  issues.json             # decomposed issue list — this IS the PRD
+  issues.json             # in-scope issue list — this IS the PRD (filtered by --scope)
+  deferred.json           # issues excluded by --scope=text-only (requires new experiments)
   progress.txt            # append-only log: per-issue edits, reviewer verdicts, learnings
   verification/
     round-{k}/
@@ -95,12 +97,26 @@ Parse the invocation string. All arguments are optional — ask the user once wi
      "severity": "major | minor | blocker",
      "acceptance_criterion": "Abstract's first sentence names the top-line benchmark number; motivation is moved to sentence 2 or later",
      "source": "reviewer-ACL.md W1  |  user-inline-bullet-3  |  meta-review recommendation #2",
+     "requires_new_experiment": false,
+     "experiment_reason": null,
      "passes": false
    }
    ```
-3. Write the list to `issues.json`. **This is the PRD.** Each issue corresponds to exactly one story; the loop does not exit until all stories have `passes: true`.
-4. If two issues conflict (reviewer A wants X removed, reviewer B wants X expanded), surface the conflict to the user via `AskUserQuestion` and let them pick — do **not** silently choose one side.
-5. If the decomposition produces zero issues, stop and report; do not invent issues to justify running.
+3. **Classify each issue for `--scope` filtering.** For every decomposed issue, set `requires_new_experiment: true` if fixing it would require any of:
+   - a new training run, fine-tuning pass, or inference sweep
+   - a new dataset, new evaluation split, or new benchmark
+   - a new ablation, new baseline comparison, or new hyperparameter sweep
+   - any new numerical result that is not already present in the existing experiment artefacts on disk
+
+   Otherwise set `requires_new_experiment: false` (text rewrites, caption/table fixes, citation swaps, reinterpretation of existing numbers, limitations additions, structural reorganisation, typos). When `true`, also set `experiment_reason` to a one-line justification (e.g., `"reviewer asks for accuracy on a held-out CIFAR-100 split — no such run exists"`).
+
+4. **Apply `--scope` filter.**
+   - If `--scope=text-only` (default): split the decomposed list into two files. Items with `requires_new_experiment: true` go to `deferred.json` (not the PRD); items with `requires_new_experiment: false` go to `issues.json`.
+   - If `--scope=all`: write everything to `issues.json` (legacy behaviour).
+   - In either case, **echo the split in the next message** so the user can redirect: `"Decomposed 12 issues — 9 in-scope, 3 deferred (need new experiments): [ids]. Continue, or rerun with --scope=all?"`.
+5. Write the in-scope list to `issues.json`. **This is the PRD.** Each issue corresponds to exactly one story; the loop does not exit until all stories have `passes: true`. Deferred issues do **not** block CLEAN exit, but they MUST be reported in `report.md`.
+6. If two issues conflict (reviewer A wants X removed, reviewer B wants X expanded), surface the conflict to the user via `AskUserQuestion` and let them pick — do **not** silently choose one side.
+7. If the decomposition produces zero in-scope issues (everything was deferred under `text-only`), stop, write `report.md` with the deferred list, and exit `BLOCKED-NO-INSCOPE` — do not invent text-only issues to justify running.
 
 ### Phase 2 — Pick the next pending issue
 
@@ -159,9 +175,10 @@ Parse the invocation string. All arguments are optional — ask the user once wi
 ### Phase 7 — Report
 
 1. Write `report.md`:
-   - Resolved arguments (`--feedback`, `--target`, `--lang`, `--reviewer`, `--max-rounds`, `--allow-bib`).
-   - Rounds used, total issues, counts of passed / remaining / escalated.
-   - Per-issue table: id, description, final verdict, file/line range of the final edit.
+   - Resolved arguments (`--feedback`, `--target`, `--lang`, `--reviewer`, `--max-rounds`, `--allow-bib`, `--scope`).
+   - Rounds used, total issues, counts of passed / remaining / escalated / deferred.
+   - Per-issue table (in-scope): id, description, final verdict, file/line range of the final edit.
+   - **Deferred — requires new experiment** (REQUIRED section, even if empty): each entry from `deferred.json` with id, description, `experiment_reason`, source, and a suggested follow-up (e.g., "run with `/youra-tools:experiments-writer` after the new sweep, or rerun with `--scope=all`"). When `--scope=all` was used this section is empty by design.
    - Outstanding non-blocking reviewer suggestions (separate list).
    - For the remaining-blockers branch: each unresolved issue with the last rejection reason and a suggested next step.
 2. Print a ≤20-line terminal summary: session path, rounds used, passed/remaining counts, final verdict (`CLEAN` if all PASS, `BLOCKED` if any remain at max-rounds).
@@ -178,6 +195,7 @@ Parse the invocation string. All arguments are optional — ask the user once wi
 - **Bib integrity for LaTeX.** Every new `\cite{key}` must resolve in `--allow-bib`. Unknown keys stop the loop until the user supplies the BibTeX entry.
 - **Language preservation.** Keep the target file's language; only `--lang` controls the reviewer prompt and progress log language. For bilingual documents, keep Korean/English pairing intact.
 - **Apply only blocking reviewer issues between rounds.** Defer non-blocking suggestions to `report.md` rather than ballooning the edit scope.
+- **Default scope is text-only.** Without `--scope=all`, never run a fix that requires a new experiment, training run, dataset, ablation, or baseline. Such issues go to `deferred.json` and `report.md`'s "Deferred — requires new experiment" section. The skill never silently fabricates numbers to satisfy an experiment-class issue.
 - **The boulder never stops.** If a hook injects `The boulder never stops`, continue iterating — do not declare done unless every story is `passes: true` with an on-disk reviewer PASS.
 
 ## Failure modes to guard against
@@ -190,6 +208,8 @@ Parse the invocation string. All arguments are optional — ask the user once wi
 - **Reviewer rubber-stamp.** The reviewer returns PASS without quoting evidence. Mitigation: Phase 4 requires per-item PASS/FAIL with evidence; missing evidence treated as FAIL.
 - **Max-rounds masquerade.** `--max-rounds` is hit with blockers remaining and the skill reports `CLEAN`. Mitigation: Phase 6 and Phase 7 explicitly branch on the remaining-blocker case; `report.md` has a required `BLOCKED` section.
 - **Silent language drift.** The revision loop accidentally converts Korean prose to English (or vice versa) to match the reviewer prompt language. Mitigation: edits preserve the target file's language; only the progress log and reviewer prompt follow `--lang`.
+- **Fabricated experiment results.** Under `--scope=text-only` the executor invents numbers for an experiment-class issue to make a reviewer pass. Mitigation: experiment-class issues never enter `issues.json`; they live in `deferred.json` only. The reviewer checklist for in-scope issues includes "did this edit add or modify any numerical result not present elsewhere in the document or experiment artefacts?" — yes counts as FAIL.
+- **Misclassification.** A genuine experiment-class issue (e.g., "report variance over 5 seeds") is mistakenly marked `requires_new_experiment: false` and the executor invents the variance. Mitigation: when in doubt, classify as `true`; the user can override by rerunning with `--scope=all` or by editing `deferred.json` → `issues.json`.
 
 ## Examples
 
@@ -204,6 +224,12 @@ What happens: The skill reads every `reviewer-*.md` and `meta-review.md` from th
 User: `/youra-tools:revision-loop --feedback="초록을 벤치마크 수치로 시작; 3.2절의 Table 2 캡션이 4.2절과 모순됨을 수정; 10-task subset 한계를 Limitations에 추가" --target=YouRA_0416_korean.tex`
 
 What happens: The skill decomposes into three issues (abstract lead, Table 2 / Section 4.2 consistency, limitations addition), each with a Korean-rooted `acceptance_criterion`. Edits stay in Korean; the progress log follows `--lang` (defaulting to `ko` because the target is Korean).
+
+### Good — text-only default with deferred experiment items
+
+User: `/youra-tools:revision-loop --feedback=.omc/reviews/2026-04-15-YouRA_0419_revised/ --target=YouRA_0419_revised.tex`
+
+What happens: The skill decomposes 12 issues. 9 are text-class (abstract rewrite, caption fix, citation swap, limitations addition, ...) → `issues.json`. 3 require new experiments ("add variance over 5 seeds", "compare against LLaMA-3 baseline", "report results on held-out CIFAR-100 split") → `deferred.json`. The skill echoes the split, runs the loop on the 9 in-scope items, and exits `CLEAN` with the 3 deferred items listed in `report.md`'s "Deferred — requires new experiment" section. The user can rerun with `--scope=all` or kick the deferred items to `/youra-tools:experiments-writer` separately.
 
 ### Bad — silent-success antipattern
 

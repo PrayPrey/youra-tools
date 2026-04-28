@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1 — 2026-04-28
+
+Made `revision-loop` default to text-only fixes so reviewer items requiring new experiments cannot trigger fabricated numbers.
+
+- `revision-loop` — added `--scope=text-only|all` (default `text-only`). Each decomposed issue is now classified with `requires_new_experiment`; experiment-class items (new training runs, datasets, ablations, baselines, or any new numerical result not already on disk) are routed to a new `deferred.json` and reported under a required "Deferred — requires new experiment" section in `report.md` instead of entering the PRD. `--scope=all` restores the legacy behaviour. Adds a fabricated-results failure mode to the reviewer checklist and a misclassification mitigation (when in doubt, defer; user can rerun with `--scope=all`).
+
 ## 0.4.0 — 2026-04-21
 
 Added a pre-submission stress-test orchestrator that wraps the peer-review ↔ revision cycle.
