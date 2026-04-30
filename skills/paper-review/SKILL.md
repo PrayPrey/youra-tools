@@ -28,7 +28,7 @@ The goal is brutal honesty with evidence — not praise. A reviewer agent must c
 If the user calls the skill with no flags, resolve to:
 
 ```
---venue=mixed --severity=strict --mode=full --num-reviewers=3 --verify=true
+--venue=mixed --severity=strict --mode=full --num-reviewers=3 --verify=true --rebuttal-max-revisions=2
 ```
 
 Still prompt once for `--paper=<path>` when the paper cannot be auto-detected; every other flag falls back to the default without asking.
@@ -62,6 +62,8 @@ Parse the invocation string. All arguments are optional — ask the user once wi
 | `--mode=<m>` | `review`, `rebuttal`, or `full`. `full` = review → auto-rebuttal by simulated authors → meta-review. | `full` |
 | `--rebuttal=<path>` | User-provided rebuttal text/file. When set, `--mode` defaults to `rebuttal`. | (empty) |
 | `--verify=true|false` | Enable Semantic Scholar + web claim verification. | `true` |
+| `--rebuttal-max-revisions=N` | Max Phase 4↔4.5 revision iterations after the first rebuttal pass. `0` disables the loop. | `2` |
+| `--rebuttal-revise-on=<verdicts>` | Comma list of audit verdicts that trigger a revision. | `UNSUPPORTED,MISREPRESENTED,NEW_CLAIM_OUT_OF_BLOCK` |
 | `--lang=en|ko` | Output language for reviews and meta-review. | Inspect paper; fallback `en`. |
 | `--out=<path>` | Output directory for the review bundle. | `.omc/reviews/{timestamp}-{paper-stem}/` |
 
@@ -82,9 +84,20 @@ Parse the invocation string. All arguments are optional — ask the user once wi
     reviewer-NeurIPS.md
     reviewer-EMNLP.md
   rebuttal/
-    authors-response.md          # either user-provided or simulated
-    reviewer-ACL-final.md        # post-rebuttal verdict per reviewer
+    authors-response.md          # final / converged rebuttal (symlink or copy of latest iter)
+    reviewer-ACL-final.md        # post-rebuttal verdict per reviewer (final iter)
     ...
+    verification/                # Phase 4.5 — rebuttal vs paper audit (final iter)
+      rebuttal-claims.json       # per-claim verdict (SUPPORTED/UNSUPPORTED/MISREPRESENTED/NEW_CLAIM)
+      audit.md                   # human-readable record incl. mismatch_reason citing paper evidence
+      summary.md                 # counts + unresolved mismatches with paper line refs
+    iterations/                  # Phase 4.6 — rebuttal revision loop history
+      iter-0/                    # initial Phase 4 + Phase 4.5
+        authors-response.md
+        reviewer-{venue}-final.md
+        verification/{rebuttal-claims.json,audit.md,summary.md}
+      iter-1/ ...                # one folder per revision attempt
+      convergence.md             # per-iter counts, what changed, stop reason
   meta-review.md                 # senior area chair synthesis
   scores.json                    # machine-readable scores
   report.md                      # top-level human-readable bundle
@@ -233,13 +246,172 @@ Branch on `--mode`:
 
 Stop after Phase 3. Produce `report.md` without rebuttal.
 
+### Phase 4.5 — Rebuttal verification (isolated subagent)
+
+Skip when `--mode=review` (no rebuttal exists). Otherwise this phase runs *after* Phase 4 and *before* Phase 5, regardless of whether the rebuttal was simulated (`full`) or user-provided (`rebuttal`).
+
+**Purpose.** A rebuttal can claim "as shown in Table 3", "we report this in Section 4.2", "our experiment uses N=10000 samples", or "we already cite X et al. 2022". The reviewer's score recovery in Phase 4 is only legitimate if those rebuttal assertions are actually true with respect to the paper. This phase audits each rebuttal claim against the paper and the Phase 2 verification bundle, then records *why* anything that does not match is wrong.
+
+**Isolation.** This pass MUST run inside a subagent so the main context is not polluted by the per-claim back-and-forth. The main agent only reads `rebuttal/verification/summary.md` back into context — never the full JSON.
+
+**Subagent invocation** (single call):
+
+```
+Agent(
+  subagent_type="oh-my-claudecode:scientist",
+  model="opus",
+  description="Verify rebuttal against paper",
+  prompt="""
+    [REBUTTAL_VERIFICATION] — paper-internal audit, no external tool calls.
+    Inputs (read from disk only):
+      - paper/paper.txt
+      - rebuttal/authors-response.md      (or user-provided rebuttal copy)
+      - verification/summary.md           (Phase 2 verdicts)
+      - reviews/reviewer-*.md             (so you know which weaknesses each
+                                           rebuttal claim is trying to close)
+
+    For every *factual* assertion the rebuttal makes — numbers, table/figure
+    references, section references, "we already showed / already cite"
+    statements, prior-work attributions, dataset stats — emit one JSON object:
+
+      {
+        "rebuttal_claim_id":   "R{n}",
+        "addresses_weakness":  "W{k} from reviewer-{venue}",
+        "quote_from_rebuttal": "<exact substring>",
+        "claimed_paper_anchor":"<table/figure/section/line as cited in rebuttal>",
+        "verdict":             "SUPPORTED | UNSUPPORTED | MISREPRESENTED | NEW_CLAIM",
+        "paper_evidence":      "<quoted paper passage with line/table number, or 'not found'>",
+        "mismatch_reason":     "<only when verdict != SUPPORTED — explain *why*
+                                 the rebuttal diverges from the paper, citing
+                                 specific paper evidence (line/table/equation)>",
+        "severity":            "blocker | major | minor"
+      }
+
+    Verdict definitions:
+      - SUPPORTED:      paper actually contains what the rebuttal claims, at
+                        the cited anchor, with the cited number/scope.
+      - UNSUPPORTED:    paper does not contain the cited result, and the
+                        rebuttal does NOT promise it as new material.
+      - MISREPRESENTED: paper contains a related result, but the rebuttal
+                        mischaracterises the number, scope, or conclusion
+                        (e.g., paper reports 84.5 but rebuttal says 88.2;
+                        paper reports on English only but rebuttal claims
+                        multilingual coverage).
+      - NEW_CLAIM:      rebuttal introduces material not present in the paper.
+                        Allowed ONLY inside an explicit "New material promised
+                        for camera-ready" block — otherwise treat as a
+                        rebuttal-rule violation and mark severity=blocker.
+
+    Cross-check rules:
+      - If the rebuttal repeats a prior-work claim that Phase 2 marked
+        CONTRADICTED, set verdict=MISREPRESENTED and reuse the Phase 2
+        evidence in mismatch_reason.
+      - Do NOT call WebSearch, WebFetch, Semantic Scholar, or Exa. This pass
+        is paper-internal. Prior-work claims are checked against
+        verification/summary.md only.
+      - When in doubt between MISREPRESENTED and UNSUPPORTED, prefer the more
+        specific verdict (MISREPRESENTED) and quote the related paper passage.
+
+    Persist to disk yourself:
+      - rebuttal/verification/rebuttal-claims.json  (array of all claim objects)
+      - rebuttal/verification/audit.md              (human-readable per-claim
+                                                     entries with quote, paper
+                                                     evidence, and mismatch_reason)
+      - rebuttal/verification/summary.md            (counts by verdict, list of
+                                                     blockers/majors with paper
+                                                     line refs, and a roll-back
+                                                     list naming each
+                                                     reviewer-{venue}-final.md
+                                                     score that depends on a
+                                                     non-SUPPORTED claim)
+
+    Return only a 10–20 line markdown summary to the caller. Do not echo the
+    full JSON back.
+  """
+)
+```
+
+**Effect on scoring and meta-review**:
+
+- Any `UNSUPPORTED` or `MISREPRESENTED` rebuttal claim **invalidates** the corresponding score recovery in `rebuttal/reviewer-{venue}-final.md`. The meta-review MUST roll those scores back toward the pre-rebuttal value and cite the audit entry by `rebuttal_claim_id`.
+- `NEW_CLAIM` outside an explicit "New material promised for camera-ready" block is a rebuttal-rule violation and is surfaced as a blocker in the meta-review.
+- A clean audit (all SUPPORTED) is recorded in the meta-review as a positive signal but does not, by itself, raise scores beyond what Phase 4 produced.
+- `audit.md` is the durable record of *why* a rebuttal claim was rejected — it must always quote the paper passage that contradicts the claim, not just say "not found".
+
+### Phase 4.6 — Rebuttal revision loop
+
+Skip when `--mode=review`, when `--rebuttal-max-revisions=0`, or when Phase 4.5's audit has zero entries matching `--rebuttal-revise-on`. Otherwise loop the rebuttal lane using the audit findings as feedback.
+
+**Mode behaviour**:
+- `--mode=full` — the simulated rebuttal is rewritten by the executor and re-audited up to `--rebuttal-max-revisions` times.
+- `--mode=rebuttal` (user-provided) — the user's rebuttal text is *not* rewritten on their behalf. Run the loop in **report-only** form: produce a `required-fixes.md` per iteration listing what the user must change, and stop after iteration 0. The convergence record still gets written so the user can apply fixes and re-invoke the skill.
+
+**Snapshot before iterating.** Move the current `rebuttal/authors-response.md`, `reviewer-{venue}-final.md`, and `verification/` outputs into `rebuttal/iterations/iter-0/` so the original artefacts are preserved.
+
+**Loop invariants** — for `i = 1 .. --rebuttal-max-revisions`:
+
+1. **Build feedback packet.** Read `rebuttal/iterations/iter-{i-1}/verification/audit.md` and pull every entry whose `verdict` is in `--rebuttal-revise-on`. For each, capture: `rebuttal_claim_id`, `quote_from_rebuttal`, `claimed_paper_anchor`, `paper_evidence`, `mismatch_reason`, `severity`. This packet is the only Phase 4.5 output that crosses into the next rebuttal — do NOT replay the full audit JSON.
+2. **Regenerate rebuttal** via `oh-my-claudecode:executor` (`model=opus`) with prompt:
+   ```
+   [REBUTTAL_REVISION iter={i}]
+   You wrote rebuttal/iterations/iter-{i-1}/authors-response.md.
+   Audit found these problems — fix every one:
+     {feedback packet}
+   Hard rules:
+     - Do NOT re-cite a table/figure/section that the audit marked
+       UNSUPPORTED. Either remove the citation or replace it with a
+       SUPPORTED anchor from the paper.
+     - For MISREPRESENTED entries, restate the claim using the exact
+       number/scope quoted in paper_evidence, or concede the weakness.
+     - NEW_CLAIM entries must move under an explicit
+       "## New material promised for camera-ready" block, or be deleted.
+     - Do NOT introduce new factual claims that are not already in the
+       paper or in the Phase 2 verification bundle.
+   Write the revised rebuttal to rebuttal/iterations/iter-{i}/authors-response.md.
+   ```
+3. **Re-run reviewer post-rebuttal pass** for the revised rebuttal — same parallel reviewer agents as Phase 4 — and write `rebuttal/iterations/iter-{i}/reviewer-{venue}-final.md`.
+4. **Re-audit** by re-invoking Phase 4.5's subagent on `iter-{i}/authors-response.md`. Persist outputs under `iter-{i}/verification/`.
+5. **Stop conditions** — break the loop and record the reason in `rebuttal/iterations/convergence.md`:
+   - `CONVERGED` — zero entries in iter-{i} match `--rebuttal-revise-on`.
+   - `EXHAUSTED` — `i == --rebuttal-max-revisions`.
+   - `NO_PROGRESS` — iter-{i} produced ≥ the same number of revise-on entries as iter-{i-1} *and* the set of `rebuttal_claim_id` values overlaps by ≥ 80%. Do not waste another iteration on a stuck rebuttal.
+   - `BLOCKED` — executor refused to revise (e.g., every remaining claim would require new experiments). Record the executor's reason verbatim.
+
+**Promote the winning iteration.** After the loop, copy the best iteration's artefacts up to `rebuttal/` (overwriting the non-iter-prefixed files):
+- Best = lowest count of revise-on verdicts, ties broken by lowest `severity=blocker` count, then by highest iteration index.
+
+**Write `rebuttal/iterations/convergence.md`**:
+
+```markdown
+# Rebuttal revision loop
+
+| Iter | UNSUPPORTED | MISREPRESENTED | NEW_CLAIM_OOB | SUPPORTED | Notes |
+|------|-------------|----------------|---------------|-----------|-------|
+| 0    | ...         | ...            | ...           | ...       | initial |
+| 1    | ...         | ...            | ...           | ...       | fixed Rk, Rm |
+| ...  |             |                |               |           |       |
+
+Stop reason: CONVERGED | EXHAUSTED | NO_PROGRESS | BLOCKED
+Promoted iteration: iter-{j}
+Carry-over blockers (still present in promoted iter): R{...}
+```
+
+**Effect on meta-review and report**:
+- The meta-review reads only `convergence.md` + the promoted iteration's `verification/summary.md`. It must explicitly state the stop reason and any carry-over blockers.
+- If stop reason is `EXHAUSTED` or `NO_PROGRESS`, the meta-review may not raise the recommendation above the pre-rebuttal level for any reviewer whose post-rebuttal score depended on a still-failing claim.
+- `report.md` shows the convergence table and links to each `iter-{i}/`.
+
+**Cost guard.** The loop is bounded by `--rebuttal-max-revisions`. Do not introduce auto-extension. If the user wants more iterations, they re-invoke the skill with a higher value.
+
 ### Phase 5 — Aggregate and report
 
-1. Write `scores.json` with machine-readable scores per reviewer per rubric dimension, before and after rebuttal.
+1. Write `scores.json` with machine-readable scores per reviewer per rubric dimension, before and after rebuttal. When Phase 4.5 rolled back a score, record both the unrolled and rolled-back values plus the offending `rebuttal_claim_id`.
 2. Write `report.md`:
    - Executive summary (2 paragraphs: one on contribution, one on remaining blockers).
    - Per-reviewer section: rubric table, key weaknesses, remaining concerns after rebuttal.
    - Verification summary: how many claims VERIFIED / CONTRADICTED / UNVERIFIED.
+   - **Rebuttal verification summary** (when Phase 4.5 ran): counts by verdict and the list of UNSUPPORTED / MISREPRESENTED / out-of-block NEW_CLAIM entries with their paper line refs and mismatch_reason — pulled verbatim from `rebuttal/verification/summary.md`.
+   - **Rebuttal revision loop** (when Phase 4.6 ran): the convergence table, stop reason, promoted iteration, and any carry-over blockers — pulled from `rebuttal/iterations/convergence.md`.
    - Meta-review verdict with the venue-appropriate decision label.
    - Actionable revision list ranked by severity.
 3. Print a short summary to the user (≤30 lines):
@@ -393,6 +565,8 @@ Each reviewer MUST also:
 - **No fabricated citations.** Every external reference in a review must come from the Semantic Scholar / Exa / WebSearch verification bundle.
 - **Strict severity = strict.** Never soften scores to be polite. A 3/5 soundness is a 3/5 soundness.
 - **Rebuttal must actually change something.** If the authors' response contains no new evidence, the reviewer score does not move up.
+- **Rebuttals are verified, not trusted.** Every factual assertion in `rebuttal/authors-response.md` (or a user-provided rebuttal) is audited against the paper in Phase 4.5 inside an isolated subagent. UNSUPPORTED / MISREPRESENTED claims roll back any score recovery they were used to justify, and `rebuttal/verification/audit.md` must quote the paper passage that contradicts each rejected claim along with a `mismatch_reason` — silent disagreement is not allowed.
+- **Rebuttal revision loop is bounded.** Phase 4.6 runs at most `--rebuttal-max-revisions` iterations. Stop early on `CONVERGED`, `NO_PROGRESS`, or `BLOCKED`. Never auto-extend the loop, never silently retry — the convergence record must always state the stop reason. For `--mode=rebuttal`, do not rewrite the user's rebuttal; emit `required-fixes.md` and stop after iter 0.
 - **Language consistency.** If `--lang=ko`, reviews are in Korean but keep equation labels, table numbers, citations, and English-origin technical terms in their original form.
 - **No silent success.** If verification could not run (MCP down, no network), say so in `verification/summary.md` and downgrade every affected reviewer's confidence by one tier.
 - **Parallelism is mandatory.** All reviewers in Phase 3 spawn in a single assistant turn; all claim batches in Phase 2 run in parallel up to the concurrency cap.
@@ -403,6 +577,7 @@ Each reviewer MUST also:
 - **Praise inflation**: reviewer writes glowing summary but gives low Overall. Enforce: Overall ≤ min(rubric sub-scores) + 1.
 - **Hallucinated prior work**: reviewer claims "X et al. 2021 already did this." Every such claim must carry a Semantic Scholar paperId in the verification bundle.
 - **Rebuttal rubber-stamp**: reviewer raises scores after a rebuttal that added nothing. The meta-reviewer must audit each raised score against `authors-response.md`.
+- **Rebuttal hallucination**: the rebuttal cites a table, figure, section, or number that does not actually exist in the paper, or misstates an existing one. Caught by Phase 4.5; the meta-review must explicitly call this out, reverse any score recovery built on the hallucinated reference, and link to the offending entry in `rebuttal/verification/audit.md`.
 - **Language drift**: reviewer flips between English and Korean within a paragraph. Enforce `--lang`.
 - **Skipping verification**: if `--verify=true` and the bundle is empty, re-run Phase 2 before Phase 3.
 - **PDF extraction glitches**: if more than 10% of extracted lines look like garbled OCR, stop and ask the user for the TeX source.
