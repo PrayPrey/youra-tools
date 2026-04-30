@@ -39,12 +39,12 @@
 
 ### `/youra-tools:paper-review`
 
-ACL / NeurIPS / EMNLP reviewer 페르소나로 **엄격한 피어 리뷰 시뮬레이션** — 객관적 루브릭 점수, Semantic Scholar + Exa/web을 이용한 사실 검증, 그리고 저자의 응답을 증거로 반박하는 rebuttal 레인. 칭찬 인플레이션 없이, 근거에 기반한 냉정한 리뷰.
+ACL / NeurIPS / EMNLP reviewer 페르소나로 **엄격한 피어 리뷰 시뮬레이션** — 객관적 루브릭 점수, Semantic Scholar + Exa/web을 이용한 사실 검증, 저자의 응답을 증거로 반박하는 rebuttal 레인, **rebuttal이 논문에 실제로 근거를 두는지 격리된 서브에이전트로 감사**하고 잘못된 클레임이 발견되면 **자동으로 rebuttal을 다시 쓰며 재감사**하는 bounded revision loop까지. 칭찬 인플레이션 없이, 근거에 기반한 냉정한 리뷰.
 
 - Invocation: `/youra-tools:paper-review --paper=<file.pdf|tex|md>`
-- Defaults: `--venue=mixed --severity=strict --mode=full --num-reviewers=3 --verify=true`
+- Defaults: `--venue=mixed --severity=strict --mode=full --num-reviewers=3 --verify=true --rebuttal-max-revisions=2`
 - Modes: `review` | `rebuttal` (`--rebuttal=<path>` 첨부) | `full` (리뷰 → 모의 저자 응답 → 메타리뷰).
-- Output: `.omc/reviews/{timestamp}-{paper-stem}/report.md` — 학회별 리뷰, 검증 번들, 메타리뷰, 최종 권고(`Accept` / `Weak Accept` / `Borderline` / `Weak Reject` / `Reject`) 포함.
+- Output: `.omc/reviews/{timestamp}-{paper-stem}/report.md` — 학회별 리뷰, 검증 번들, **rebuttal 감사 (`rebuttal/verification/audit.md`)**, **revision 루프 이력 (`rebuttal/iterations/iter-{i}/` + `convergence.md`)**, 메타리뷰, 최종 권고(`Accept` / `Weak Accept` / `Borderline` / `Weak Reject` / `Reject`) 포함.
 - Triggers (Korean): `논문 리뷰`, `피어 리뷰`, `리뷰어 시뮬레이션`, `리뷰탈`.
 
 ### `/youra-tools:revision-loop`
