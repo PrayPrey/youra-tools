@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0 — 2026-04-30
+
+Added rebuttal-side fact checking and a bounded revision loop to `paper-review` so simulated/user rebuttals cannot smuggle in claims the paper does not actually support.
+
+- `paper-review` — new **Phase 4.5 (Rebuttal verification)**: an isolated `scientist` (opus) subagent audits every factual assertion in the rebuttal against the paper text and the Phase 2 verification bundle, emitting per-claim verdicts (`SUPPORTED` / `UNSUPPORTED` / `MISREPRESENTED` / `NEW_CLAIM`) and a `mismatch_reason` that quotes the paper passage which contradicts the claim. Persisted to `rebuttal/verification/{rebuttal-claims.json, audit.md, summary.md}`. Main context only re-reads the summary so the loop stays clean. UNSUPPORTED / MISREPRESENTED entries roll back the corresponding post-rebuttal score recovery; out-of-block `NEW_CLAIM` is treated as a rebuttal-rule violation.
+- `paper-review` — new **Phase 4.6 (Rebuttal revision loop)**: feeds the audit findings back into the rebuttal lane and reruns Phase 4 → 4.5 up to `--rebuttal-max-revisions` (default `2`) times. Stops on `CONVERGED`, `EXHAUSTED`, `NO_PROGRESS`, or `BLOCKED`; the best iteration is promoted to `rebuttal/` and per-iteration history is preserved under `rebuttal/iterations/iter-{i}/` with a `convergence.md` recording the stop reason and carry-over blockers. For `--mode=rebuttal` the user's text is never rewritten — the loop emits a `required-fixes.md` and stops after iter 0.
+- `paper-review` — new flags `--rebuttal-max-revisions=N` (default `2`, `0` disables the loop) and `--rebuttal-revise-on=<verdicts>` (default `UNSUPPORTED,MISREPRESENTED,NEW_CLAIM_OUT_OF_BLOCK`). New rules ("Rebuttals are verified, not trusted", "Rebuttal revision loop is bounded") and a new failure mode ("Rebuttal hallucination") added to the skill spec.
+- Catches up `marketplace.json` to match the previously published `0.4.1` `revision-loop` text-only default — installs that pinned by version were not picking that up.
+
 ## 0.4.1 — 2026-04-28
 
 Made `revision-loop` default to text-only fixes so reviewer items requiring new experiments cannot trigger fabricated numbers.
